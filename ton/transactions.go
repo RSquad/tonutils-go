@@ -362,18 +362,20 @@ func (c *APIClient) findLastTransactionByHash(ctx context.Context, addr *address
 						return transaction, nil
 					}
 				}
-
-				continue
 			} else {
 				if transaction.IO.In == nil {
 					continue
 				}
-				if !bytes.Equal(transaction.IO.In.Msg.Payload().Hash(), msgHash) {
-					continue
+
+				if transaction.IO.In.MsgType == tlb.MsgTypeExternalIn &&
+					bytes.Equal(transaction.IO.In.Msg.(*tlb.ExternalMessageIn).NormalizedHash(), msgHash) {
+					return transaction, nil
+				}
+
+				if bytes.Equal(transaction.IO.In.Msg.Payload().Hash(), msgHash) {
+					return transaction, nil
 				}
 			}
-
-			return transaction, nil
 		}
 
 		scanned += 15

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"reflect"
 	"strings"
 	"sync"
@@ -70,6 +71,8 @@ type ADNL struct {
 	recvPriorityAddrVer  int32
 	ourAddrVerOnPeerSide int32
 
+	peerID       []byte
+	sharedKey    []byte
 	peerKey      ed25519.PublicKey
 	ourAddresses unsafe.Pointer
 
@@ -174,6 +177,16 @@ func (a *ADNL) processPacket(packet *PacketContent, fromChannel bool) (err error
 	if !fromChannel && packet.From != nil {
 		a.mx.Lock()
 		if a.peerKey == nil {
+			a.sharedKey, err = keys.SharedKey(a.ourKey, packet.From.Key)
+			if err != nil {
+				return err
+			}
+
+			a.peerID, err = tl.Hash(keys.PublicKeyED25519{Key: packet.From.Key})
+			if err != nil {
+				return err
+			}
+
 			a.peerKey = packet.From.Key
 		}
 		a.mx.Unlock()
@@ -512,13 +525,16 @@ func (a *ADNL) Query(ctx context.Context, req, result tl.Serializable) error {
 	a.activeQueries[reqID] = res
 	a.mx.Unlock()
 
+	defer func() {
+		a.mx.Lock()
+		delete(a.activeQueries, reqID)
+		a.mx.Unlock()
+	}()
+
 	baseMTU := false
 reSplit:
 	packets, err := a.buildRequestMaySplit(q, baseMTU)
 	if err != nil {
-		a.mx.Lock()
-		delete(a.activeQueries, reqID)
-		a.mx.Unlock()
 		return fmt.Errorf("request failed: %w", err)
 	}
 
@@ -685,7 +701,7 @@ func (a *ADNL) send(buf []byte) error {
 		// not close on io timeout because it can be triggered by network overload
 		if !strings.Contains(err.Error(), "i/o timeout") {
 			// it should trigger disconnect handler in read routine
-			a.writer.Close()
+			a.Close()
 		}
 		return err
 	} else if n != len(buf) {
@@ -700,12 +716,12 @@ func decodePacket(key ed25519.PrivateKey, packet []byte) ([]byte, error) {
 	checksum := packet[32:64]
 	data := packet[64:]
 
-	key, err := SharedKey(key, pub)
+	key, err := keys.SharedKey(key, pub)
 	if err != nil {
 		return nil, err
 	}
 
-	ctr, err := BuildSharedCipher(key, checksum)
+	ctr, err := keys.BuildSharedCipher(key, checksum)
 	if err != nil {
 		return nil, err
 	}
@@ -731,12 +747,11 @@ func (a *ADNL) GetAddressList() address.List {
 }
 
 func (a *ADNL) GetID() []byte {
-	id, _ := tl.Hash(PublicKeyED25519{Key: a.peerKey})
-	return id
+	return append([]byte{}, a.peerID...)
 }
 
 func (a *ADNL) GetPubKey() ed25519.PublicKey {
-	return a.peerKey
+	return append(ed25519.PublicKey{}, a.peerKey...)
 }
 
 func (a *ADNL) Reinit() {
@@ -788,9 +803,9 @@ func (a *ADNL) createPacket(seqno int64, isResp bool, msgs ...any) ([]byte, erro
 	}
 
 	if !isResp {
-		packet.From = &PublicKeyED25519{Key: a.ourKey.Public().(ed25519.PublicKey)}
+		packet.From = &keys.PublicKeyED25519{Key: a.ourKey.Public().(ed25519.PublicKey)}
 	} else {
-		packet.FromIDShort, err = tl.Hash(PublicKeyED25519{Key: a.ourKey.Public().(ed25519.PublicKey)})
+		packet.FromIDShort, err = tl.Hash(keys.PublicKeyED25519{Key: a.ourKey.Public().(ed25519.PublicKey)})
 		if err != nil {
 			return nil, err
 		}
@@ -821,23 +836,14 @@ func (a *ADNL) createPacket(seqno int64, isResp bool, msgs ...any) ([]byte, erro
 	hash := sha256.Sum256(packetData)
 	checksum := hash[:]
 
-	key, err := SharedKey(a.ourKey, a.peerKey)
-	if err != nil {
-		return nil, err
-	}
-
-	ctr, err := BuildSharedCipher(key, checksum)
+	ctr, err := keys.BuildSharedCipher(a.sharedKey, checksum)
 	if err != nil {
 		return nil, err
 	}
 
 	ctr.XORKeyStream(packetData, packetData)
 
-	enc, err := tl.Hash(PublicKeyED25519{Key: a.peerKey})
-	if err != nil {
-		return nil, err
-	}
-	copy(bufData, enc)
+	copy(bufData, a.peerID)
 	copy(bufData[32:], a.ourKey.Public().(ed25519.PublicKey))
 	copy(bufData[64:], checksum)
 

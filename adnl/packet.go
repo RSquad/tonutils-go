@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/xssnick/tonutils-go/adnl/address"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tl"
 )
 
 type PacketContent struct {
 	Rand1                       []byte
-	From                        *PublicKeyED25519
+	From                        *keys.PublicKeyED25519
 	FromIDShort                 []byte
 	Messages                    []any
 	Address                     *address.List
@@ -69,7 +70,7 @@ func parsePacket(data []byte) (_ *PacketContent, err error) {
 			return nil, ErrTooShortData
 		}
 
-		var key PublicKeyED25519
+		var key keys.PublicKeyED25519
 		data, err = tl.Parse(&key, data, true)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse 'from' key, err: %w", err)
@@ -183,7 +184,7 @@ func (p *PacketContent) Serialize(buf *bytes.Buffer) (int, error) {
 	binary.LittleEndian.PutUint32(tmp, _PacketContentID)
 	buf.Write(tmp)
 
-	tl.ToBytesToBuffer(buf, p.Rand1)
+	_ = tl.ToBytesToBuffer(buf, p.Rand1)
 
 	var flags uint32
 	if p.Seqno != nil {
@@ -313,10 +314,10 @@ func (p *PacketContent) Serialize(buf *bytes.Buffer) (int, error) {
 	}
 
 	if p.Signature != nil {
-		tl.ToBytesToBuffer(buf, p.Signature)
+		_ = tl.ToBytesToBuffer(buf, p.Signature)
 	}
 
-	tl.ToBytesToBuffer(buf, p.Rand2)
+	_ = tl.ToBytesToBuffer(buf, p.Rand2)
 
 	return payloadLen, nil
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/xssnick/tonutils-go/adnl/address"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tl"
 	"net"
 	"net/netip"
@@ -124,8 +125,7 @@ func NewGatewayWithNetManager(key ed25519.PrivateKey, reader NetManager) *Gatewa
 var PacketsBufferSize = 128 * 1024
 
 var DefaultListener = func(addr string) (net.PacketConn, error) {
-	// since ip field in adnl accept only 4 bytes, we cannot fully support v6 right now
-	lp, err := net.ListenPacket("udp4", addr)
+	lp, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +301,7 @@ func (g *Gateway) listen(rootId []byte) {
 					continue
 				}
 
-				peerId, err = tl.Hash(PublicKeyED25519{Key: packet.From.Key})
+				peerId, err = tl.Hash(keys.PublicKeyED25519{Key: packet.From.Key})
 				if err != nil {
 					Logger("invalid peer id, err:", err.Error())
 					continue
@@ -431,8 +431,23 @@ func (g *Gateway) registerClient(addr net.Addr, key ed25519.PublicKey, id string
 	addrList.Version = addrList.ReinitDate
 
 	a := g.initADNL()
-	a.SetAddresses(addrList)
+
+	sharedKey, err := keys.SharedKey(a.ourKey, key)
+	if err != nil {
+		return nil, err
+	}
+
+	peerId, err := tl.Hash(keys.PublicKeyED25519{Key: key})
+	if err != nil {
+		return nil, err
+	}
+
+	a.peerID = peerId
+	a.sharedKey = sharedKey
 	a.peerKey = key
+
+	a.SetAddresses(addrList)
+
 	a.addr = addr.String()
 	a.writer = newWriter(func(p []byte, deadline time.Time) (err error) {
 		currentAddr := *(*net.Addr)(atomic.LoadPointer(&peer.addr))
@@ -493,7 +508,7 @@ func (g *Gateway) RegisterClient(addr string, key ed25519.PublicKey) (Peer, erro
 	}
 	udpAddr := net.UDPAddrFromAddrPort(pAddr)
 
-	clientId, err := tl.Hash(PublicKeyED25519{Key: key})
+	clientId, err := tl.Hash(keys.PublicKeyED25519{Key: key})
 	if err != nil {
 		return nil, err
 	}
@@ -529,7 +544,7 @@ func (g *Gateway) write(addr net.Addr, buf []byte) error {
 }
 
 func (g *Gateway) GetID() []byte {
-	id, _ := tl.Hash(PublicKeyED25519{Key: g.key.Public().(ed25519.PublicKey)})
+	id, _ := tl.Hash(keys.PublicKeyED25519{Key: g.key.Public().(ed25519.PublicKey)})
 	return id
 }
 
@@ -564,7 +579,9 @@ func (p *peerConn) SetDisconnectHandler(handler func(addr string, key ed25519.Pu
 		p.server.mx.Unlock()
 
 		if handler != nil {
-			handler(addr, key)
+			// run it async to avoid potential deadlock issues in user code
+			// in case closed under lock, and the same lock is used in handler
+			go handler(addr, key)
 		}
 	})
 }

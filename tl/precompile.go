@@ -30,6 +30,7 @@ const (
 	_ExecuteTypeLong
 	_ExecuteTypeBool
 	_ExecuteTypeVector
+	_ExecuteTypeIP6
 )
 
 const (
@@ -107,8 +108,11 @@ func compileField(parent reflect.Type, f reflect.StructField, tags []string) *fi
 			// creating virtual struct with one field
 			// to simplify serialization in runtime
 			info.structInfo = &structInfo{
-				tp:        f.Type,
-				fields:    []*fieldInfo{elemInfo},
+				tp:     f.Type,
+				fields: []*fieldInfo{elemInfo},
+				fabric: func() reflect.Value {
+					return reflect.New(f.Type)
+				},
 				finalized: true,
 				tlName:    "##unusable_name",
 			}
@@ -124,13 +128,13 @@ func compileField(parent reflect.Type, f reflect.StructField, tags []string) *fi
 				tags = tags[1:]
 			}
 
-			var err error
-			var num int
+			var num uint32
 			if len(tags) > 1 {
-				num, err = strconv.Atoi(tags[1])
-				if err != nil || num <= 0 {
+				numP, err := strconv.ParseUint(tags[1], 10, 32)
+				if err != nil {
 					panic("cells num tag should be positive integer")
 				}
+				num = uint32(numP)
 			}
 
 			if f.Type == reflect.TypeOf(&cell.Cell{}) {
@@ -167,7 +171,7 @@ func compileField(parent reflect.Type, f reflect.StructField, tags []string) *fi
 				}
 				structFlags |= _StructFlagsInterface
 
-				list := splitAllowed(tags[2:])
+				list := parseAllowed(tags[2:])
 				for _, s := range list {
 					info.allowedTypes = append(info.allowedTypes, getStructInfoReferenceByShortName(s))
 				}
@@ -194,7 +198,11 @@ func compileField(parent reflect.Type, f reflect.StructField, tags []string) *fi
 					if tags[0] == "int256" {
 						info.typ = _ExecuteTypeInt256
 					} else if tags[0] == "int128" {
-						info.typ = _ExecuteTypeInt128
+						if f.Type == reflect.TypeOf(net.IP{}) {
+							info.typ = _ExecuteTypeIP6
+						} else {
+							info.typ = _ExecuteTypeInt128
+						}
 					} else {
 						info.typ = _ExecuteTypeBytes
 					}
@@ -245,6 +253,7 @@ func compileField(parent reflect.Type, f reflect.StructField, tags []string) *fi
 type structInfo struct {
 	id              []byte
 	tp              reflect.Type
+	fabric          func() reflect.Value
 	fields          []*fieldInfo
 	manualSerialize bool
 	manualParse     bool
@@ -292,7 +301,12 @@ func addressablePtr(val reflect.Value) (reflect.Value, error) {
 		return val, nil
 	case reflect.Struct:
 		if !val.CanAddr() {
-			rvx := reflect.New(val.Type())
+			si := _structInfoTable[val.Type().String()]
+			if si == nil {
+				return reflect.Value{}, fmt.Errorf("tl type %s is not compilled", val.Type().String())
+			}
+
+			rvx := si.fabric()
 			rvx.Elem().Set(val)
 			return rvx, nil
 		}
@@ -432,7 +446,7 @@ func Parse(v Serializable, data []byte, boxed bool) (_ []byte, err error) {
 			return nil, err
 		}
 
-		e := reflect.New(info.tp)
+		e := info.fabric()
 		if data, err = parsePrecompiled(e.UnsafePointer(), info, false, data, false); err != nil {
 			return nil, err
 		}
@@ -611,7 +625,7 @@ func executeParse(buf []byte, base unsafe.Pointer, si *structInfo, noCopy bool) 
 			}
 
 			if structFlags&_StructFlagsPointer != 0 { // pointer
-				nw := reflect.New(info.tp).UnsafePointer()
+				nw := info.fabric().UnsafePointer()
 				*(*unsafe.Pointer)(ptr) = nw
 				ptr = nw
 			} else if structFlags&_StructFlagsInterface != 0 {
@@ -627,7 +641,7 @@ func executeParse(buf []byte, base unsafe.Pointer, si *structInfo, noCopy bool) 
 							return nil, fmt.Errorf("invalid type %s is not allowed at field %s", info.tp.String(), field.String())
 						}
 
-						e := reflect.New(info.tp)
+						e := info.fabric()
 						if source, err = parsePrecompiled(e.UnsafePointer(), info, false, source, noCopy); err != nil {
 							return nil, err
 						}
@@ -653,7 +667,7 @@ func executeParse(buf []byte, base unsafe.Pointer, si *structInfo, noCopy bool) 
 						return nil, fmt.Errorf("invalid type %s is not allowed at field %s", info.tp.String(), field.String())
 					}
 
-					e := reflect.New(info.tp)
+					e := info.fabric()
 					if source, err = parsePrecompiled(e.UnsafePointer(), info, false, source, noCopy); err != nil {
 						return nil, err
 					}
@@ -779,9 +793,13 @@ func executeSerialize(buf *bytes.Buffer, base unsafe.Pointer, si *structInfo) er
 			binary.LittleEndian.PutUint32(tmp, flags)
 			buf.Write(tmp)
 		case _ExecuteTypeString:
-			ToBytesToBuffer(buf, []byte(*(*string)(ptr)))
+			if err := ToBytesToBuffer(buf, []byte(*(*string)(ptr))); err != nil {
+				return fmt.Errorf("failed to serialize string field %s: %w", field.String(), err)
+			}
 		case _ExecuteTypeBytes:
-			ToBytesToBuffer(buf, *(*[]byte)(ptr))
+			if err := ToBytesToBuffer(buf, *(*[]byte)(ptr)); err != nil {
+				return fmt.Errorf("failed to serialize bytes field %s: %w", field.String(), err)
+			}
 		case _ExecuteTypeInt256:
 			if bts := *(*[]byte)(ptr); len(bts) == 32 {
 				buf.Write(*(*[]byte)(ptr))
@@ -835,26 +853,31 @@ func executeSerialize(buf *bytes.Buffer, base unsafe.Pointer, si *structInfo) er
 			c := *(**cell.Cell)(ptr)
 			if c == nil {
 				if field.meta.(bool) {
-					ToBytesToBuffer(buf, nil)
+					_ = ToBytesToBuffer(buf, nil)
 					break
 				}
 				return fmt.Errorf("nil cell is not allowed in field %s", field.String())
 			}
-			ToBytesToBuffer(buf, (*(**cell.Cell)(ptr)).ToBOCWithFlags(false))
+
+			if err := ToBytesToBuffer(buf, (*(**cell.Cell)(ptr)).ToBOCWithFlags(false)); err != nil {
+				return fmt.Errorf("failed to serialize cell field %s: %w", field.String(), err)
+			}
 		case _ExecuteTypeSliceCell:
 			c := *(*[]*cell.Cell)(ptr)
 			flag := field.meta.(uint32)
 			num := flag & 0x7FFFFFFF
 
 			if len(c) == 0 && flag&(1<<31) != 0 {
-				ToBytesToBuffer(buf, nil)
+				_ = ToBytesToBuffer(buf, nil)
 				break
 			}
 
 			if num > 0 && uint32(len(c)) != num {
 				return fmt.Errorf("incorrect cells len %d in field %s", len(c), field.String())
 			}
-			ToBytesToBuffer(buf, cell.ToBOCWithFlags(c, false))
+			if err := ToBytesToBuffer(buf, cell.ToBOCWithFlags(c, false)); err != nil {
+				return fmt.Errorf("failed to serialize slice cell field %s: %w", field.String(), err)
+			}
 		case _ExecuteTypeStruct:
 			info := field.structInfo
 			structFlags := field.meta.(uint32)

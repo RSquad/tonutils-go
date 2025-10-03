@@ -8,6 +8,7 @@ import (
 	"errors"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"net"
+	"reflect"
 	"testing"
 )
 
@@ -96,9 +97,12 @@ func init() {
 	Register(TestInner{}, "in 123") // root 777
 	Register(TestTL{}, "root 222")
 	Register(TestManual{}, "manual val")
+	Register(AnyBig{}, "anybig")
 
 	buf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(buf, Register(Small{}, "small 123"))
+	binary.LittleEndian.PutUint32(buf, RegisterWithFabric(Small{}, "small 123", func() reflect.Value {
+		return reflect.ValueOf(&Small{})
+	}))
 	println(hex.EncodeToString(buf))
 }
 
@@ -169,4 +173,22 @@ func BenchmarkParse(b *testing.B) {
 		}
 	}
 	_ = tst
+}
+
+type AnyBig struct {
+	Data [][]byte `tl:"vector bytes"`
+}
+
+func BenchmarkSerialize(b *testing.B) {
+	v := AnyBig{}
+	for i := 0; i < 100; i++ {
+		v.Data = append(v.Data, make([]byte, 1<<20))
+	}
+
+	for i := 0; i < b.N; i++ {
+		_, err := Serialize(&v, true)
+		if err != nil {
+			panic(err)
+		}
+	}
 }
