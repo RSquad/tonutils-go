@@ -25,13 +25,14 @@ type McBlockExtra struct {
 }
 
 type BlockExtra struct {
-	_                  Magic         `tlb:"#4a33f6fd"`
+	_                  Magic         `tlb:"#4a33f6fb"`
 	InMsgDesc          *cell.Cell    `tlb:"^"`
 	OutMsgDesc         *cell.Cell    `tlb:"^"`
 	ShardAccountBlocks *cell.Cell    `tlb:"^"`
 	RandSeed           []byte        `tlb:"bits 256"`
 	CreatedBy          []byte        `tlb:"bits 256"`
 	Custom             *McBlockExtra `tlb:"maybe ^"`
+	WcCustom           *cell.Cell    `tlb:"maybe ^"`
 }
 
 type ShardAccountBlocks struct {

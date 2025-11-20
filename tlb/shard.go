@@ -2,6 +2,7 @@ package tlb
 
 import (
 	"encoding/binary"
+
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
@@ -18,7 +19,7 @@ func init() {
 type ShardID uint64
 
 type ShardStateUnsplit struct {
-	_               Magic      `tlb:"#9023afe2"`
+	_               Magic      `tlb:"#9023afd4"`
 	GlobalID        int32      `tlb:"## 32"`
 	ShardIdent      ShardIdent `tlb:"."`
 	Seqno           uint32     `tlb:"## 32"`
@@ -33,6 +34,7 @@ type ShardStateUnsplit struct {
 	} `tlb:"^"`
 	Stats        *cell.Cell `tlb:"^"`
 	McStateExtra *cell.Cell `tlb:"maybe ^"`
+	WcCustom     *cell.Cell `tlb:"maybe ^"`
 }
 
 type McStateExtra struct {
